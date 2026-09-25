@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dado-orchestration"
+version = "0.1.0"
+description = "Durable Artifact-Driven Orchestration for OpenCode"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=6.0", "jsonschema>=4.20"]
+license = {text = "MIT"}
+authors = [{name = "DADO contributors"}]
+classifiers = ["Programming Language :: Python :: 3", "Operating System :: OS Independent"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+dado = "dado.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.package-data]
+dado = ["schemas/*.json", "templates/**/*", "templates/.*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

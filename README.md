@@ -1,6 +1,6 @@
 # DADO — Durable Artifact-Driven Orchestration
 
-**Context is disposable. Work is durable.** DADO adds a small, local deterministic runtime and role prompts on top of OpenCode. YAML/Markdown artifacts—not conversation history—are the source of truth. There is no DADO telemetry and no external runtime service.
+**Context is disposable. Work is durable.** DADO organizes OpenCode agents into a resumable workflow that records progress and verifies changes. Use less expensive models for bounded tasks and reserve more capable models for planning or review to help control costs without giving up oversight. DADO uses a small local runtime and durable YAML/Markdown artifacts—not conversation history—as the source of truth. There is no DADO telemetry or external runtime service.
 
 ## Install
 

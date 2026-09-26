@@ -12,11 +12,11 @@ User → dado-master → focused explorer/researcher evidence → spec + DAG
 
 Only `dado-master` is primary; all other roles are subagents. The roles are intentionally few: orchestration/planning belongs to master, bounded implementation to worker, verification to verifier, local discovery to explorer, external references to researcher, and explicit archive lookup to historian. Shared protocol detail is loaded from one skill instead of copied into prompts.
 
-Runtime modules: `domain.py` (DAG/transitions), `store.py` (state/verification/recovery/archive), `fs.py` (atomic writes/lock/event append), `models.py` (OpenCode model adapter), `installer.py` (managed-file ownership), and `cli.py`. YAML artifacts are validated by JSON Schema at runtime. `events.jsonl` is append-only audit/diagnostic data, not the primary state source.
+Runtime modules: `domain.py` (DAG/transitions), `store.py` (state/verification/recovery/archive), `fs.py` (atomic writes/lock/event append), `models.py` (OpenCode model adapter), `installer.py` (managed-file ownership), and `cli.py`. YAML artifacts are validated by packaged JSON Schema at runtime. `events.jsonl` is append-only audit/diagnostic data, not the primary state source.
 
 ## Scheduler and concurrency
 
-`work ready` calculates tasks whose dependencies are done, bounded by the configured parallelism. OpenCode currently provides subagent invocation, not a DADO-specific durable scheduler API; the master uses deterministic CLI results to select work. Exact file/directory scopes are compared; any glob scope conservatively serializes against another task because glob intersection is difficult to prove. Writes use temp + atomic rename; state-changing operations share a local lock. This is local single-project coordination, not distributed locking.
+`work ready` calculates tasks whose dependencies are done, bounded by configured parallelism. A CLI override may reduce, but not exceed, configured capacity. Starting a task rechecks capacity and scope under the state lock. OpenCode provides subagent invocation, not a DADO-specific durable scheduler API; the master uses deterministic CLI results to select work. Exact file/directory scopes are compared; glob scopes conservatively serialize. Writes use temp + atomic rename; state-changing operations share a local lock. This is local single-project coordination, not distributed locking.
 
 ## Security boundaries
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -15,7 +16,7 @@ from .domain import validate_dag
 from .errors import DadoError, ValidationError
 from .fs import atomic_write, read_yaml
 from .installer import install, uninstall
-from .models import ROLES, catalog, set_agent_model
+from .models import ROLES, agent_model, catalog, set_agent_model
 from .store import Store
 
 
@@ -38,24 +39,9 @@ def _print_json(value: Any) -> None:
 
 
 def _max_parallel(root: Path, override: int | None = None) -> int:
-    if override is not None:
-        return max(1, override)
     config = Store(root).load_config()
-    return max(1, int(config.get("scheduler", {}).get("max_parallel_workers", 3)))
-
-
-def _template_schema_copy(project: Path) -> list[str]:
-    import shutil
-    schema_dir = Path(__file__).parent / "schemas"
-    destination = project / ".dado" / "schemas"
-    written = []
-    destination.mkdir(parents=True, exist_ok=True)
-    for schema in schema_dir.glob("*.json"):
-        target = destination / schema.name
-        if not target.exists():
-            shutil.copyfile(schema, target)
-            written.append(str(target.relative_to(project)))
-    return written
+    configured = max(1, int(config.get("scheduler", {}).get("max_parallel_workers", 3)))
+    return min(configured, max(1, override)) if override is not None else configured
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
@@ -63,12 +49,11 @@ def _cmd_init(args: argparse.Namespace) -> int:
     root.mkdir(parents=True, exist_ok=True)
     Store(root).init()
     installed, conflicts = install(root, force=args.force)
-    schemas = _template_schema_copy(root)
     gitignore = root / ".dado" / ".gitignore"
     if not gitignore.exists():
-        atomic_write(gitignore, "# Keep structured work artifacts in Git; omit large/transient evidence.\nevidence/**/*.log\nevidence/**/*.tmp\ncache/\n*.tmp\n")
+        atomic_write(gitignore, "# If DADO data is versioned, exclude large/transient evidence.\nevidence/**/*.log\nevidence/**/*.tmp\ncache/\n*.tmp\n")
     print(f"Initialized DADO in {root}")
-    for item in installed + schemas:
+    for item in installed:
         print(f"  installed {item}")
     for item in conflicts:
         print(f"  preserved conflict: {item}")
@@ -125,7 +110,7 @@ def _cmd_work_show(args: argparse.Namespace) -> int:
     path = store.work_path(args.id)
     work = store.load_work(path)
     tasks = store.load_tasks(path)
-    _print_json({"work": work, "requirements": work.get("requirements", []), "tasks": tasks, "artifacts": ["request.md", "spec.md", "decisions.md", "plan.yaml"]})
+    _print_json({"work": work, "tasks": tasks, "artifacts": [p.name for p in path.iterdir() if p.is_file()]})
     return 0
 
 
@@ -138,7 +123,7 @@ def _cmd_work_create(args: argparse.Namespace) -> int:
 
 
 def _cmd_task_add(args: argparse.Namespace) -> int:
-    packet = yaml.safe_load(Path(args.packet).read_text(encoding="utf-8"))
+    packet = yaml.safe_load(sys.stdin.read() if args.packet == "-" else Path(args.packet).read_text(encoding="utf-8"))
     if not isinstance(packet, dict):
         raise ValidationError("Task packet YAML must contain one mapping")
     Store(project_root(args.project)).add_task(args.id, packet)
@@ -160,7 +145,7 @@ def _cmd_ready(args: argparse.Namespace) -> int:
 
 
 def _cmd_result(args: argparse.Namespace) -> int:
-    result = yaml.safe_load(Path(args.packet).read_text(encoding="utf-8"))
+    result = yaml.safe_load(sys.stdin.read() if args.packet == "-" else Path(args.packet).read_text(encoding="utf-8"))
     if not isinstance(result, dict):
         raise ValidationError("Result YAML must contain one mapping")
     Store(project_root(args.project)).record_result(args.id, result)
@@ -169,7 +154,10 @@ def _cmd_result(args: argparse.Namespace) -> int:
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
-    Store(project_root(args.project)).verify_task(args.id, args.task, args.verdict, args.check or [], args.evidence or [])
+    if args.changed and not args.paths_checked:
+        raise ValidationError("--changed requires --paths-checked")
+    checked = (args.changed or []) if args.paths_checked else None
+    Store(project_root(args.project)).verify_task(args.id, args.task, args.verdict, args.check or [], args.evidence or [], checked)
     print(f"{args.task}: independent verification {args.verdict}")
     return 0
 
@@ -194,6 +182,12 @@ def _cmd_requirement(args: argparse.Namespace) -> int:
 def _cmd_archive(args: argparse.Namespace) -> int:
     path = Store(project_root(args.project)).archive(args.id)
     print(f"Archived work at {path}")
+    return 0
+
+
+def _cmd_link_commit(args: argparse.Namespace) -> int:
+    sha = Store(project_root(args.project)).link_commit(args.id, args.commit)
+    print(f"Linked {sha} to archived work {args.id}")
     return 0
 
 
@@ -242,37 +236,60 @@ def _cmd_models(args: argparse.Namespace) -> int:
         print(f"  {idx}. {model}")
     if args.list:
         return 0
-    if args.model:
+    if args.model or args.variant is not None:
         selected_roles = args.roles or list(ROLES)
+        if args.model == "inherit" and args.variant not in (None, "none"):
+            raise ValidationError("Cannot choose a variant when inheriting the session model")
+        pending_models = []
         for role in selected_roles:
             if role not in ROLES:
                 raise ValidationError(f"Unknown DADO agent: {role}")
             path = agents / f"{role}.md"
             if not path.exists():
                 raise ValidationError(f"Agent is not installed: {path}; run `dado init`")
-            set_agent_model(path, None if args.model == "inherit" else args.model, available)
-        print(f"Updated {', '.join(selected_roles)} to {args.model}")
+            current = agent_model(path)
+            model = args.model if args.model else (current or "").split("#", 1)[0] or None
+            if args.variant not in (None, "none") and model is None:
+                raise ValidationError(f"{role} inherits its model; select a model before setting a variant")
+            selected = None if model == "inherit" else model
+            # Retain the existing variant only when the base model is unchanged.
+            variant = (args.variant if args.variant not in (None, "none") else None)
+            if args.variant is None and current and model == current.split("#", 1)[0]:
+                variant = current.partition("#")[2] or None
+            if selected and selected.split("#", 1)[0] not in {entry.split("#", 1)[0] for entry in available}:
+                raise ValidationError(f"Model is not in current OpenCode catalog: {selected}")
+            if variant is not None and (selected is None or "#" in selected or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", variant)):
+                raise ValidationError("Variant requires a selected base model and a valid variant ID")
+            pending_models.append((path, selected, variant))
+        for path, selected, variant in pending_models:
+            set_agent_model(path, selected, available, variant)
+        print(f"Updated {', '.join(selected_roles)}")
         return 0
-    print("Choose per-agent model. Enter a catalog number, `i` to inherit OpenCode default, or `q` to quit.")
-    pending: dict[str, str | None] = {}
+    print("Choose per-agent model and optional variant (model-specific ID). Enter `i` to inherit or `q` to quit.")
+    pending: dict[str, tuple[str | None, str | None]] = {}
     for role in ROLES:
         value = input(f"{role}: ").strip()
         if value.lower() == "q":
             print("No changes made.")
             return 0
         if value.lower() == "i":
-            pending[role] = None
+            pending[role] = (None, None)
         else:
             try:
                 index = int(value)
                 if not 1 <= index <= len(available):
                     raise ValueError
-                pending[role] = available[index - 1]
+                chosen, _, catalog_variant = available[index - 1].partition("#")
+                value = input(f"{role} variant (blank keeps {catalog_variant or 'model default'}, '-' clears): ").strip()
+                variant = None if value == "-" else value or catalog_variant or None
+                if variant and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", variant):
+                    raise ValidationError(f"Invalid variant for {role}")
+                pending[role] = (chosen, variant)
             except (ValueError, IndexError):
                 raise ValidationError(f"Invalid selection for {role}")
-    for role, model in pending.items():
-        set_agent_model(agents / f"{role}.md", model, available)
-    print("Updated agent frontmatter. No separate DADO model registry was created.")
+    for role, (model, variant) in pending.items():
+        set_agent_model(agents / f"{role}.md", model, available, variant)
+    print("Updated agent frontmatter. OpenCode checks whether the model supports each variant when used.")
     return 0
 
 
@@ -311,15 +328,15 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             if running:
                 print(f"WARNING abandoned/uncertain running tasks in {item['id']}: {', '.join(running)} (run dado resume {item['id']})")
             for task in tasks:
-                result = read_yaml(path / "results" / f"{task['id']}.yaml")
-                verification = read_yaml(path / "verification" / f"{task['id']}.yaml")
-                if result is not None:
+                result = store._result(path, task)
+                verification = store._verdict(path, task)
+                if result:
                     store._schema_validate("result", result)
-                if verification is not None:
+                if verification:
                     store._schema_validate("verification", verification)
                 if task["status"] == "done" and (verification or {}).get("verdict") != "PASS":
                     raise ValidationError(f"{task['id']} is done without durable verifier PASS")
-                if task["status"] == "review" and result is None:
+                if task["status"] == "review" and not result:
                     raise ValidationError(f"{task['id']} is in review without a worker result")
             print(f"DAG {item['id']}: valid ({len(tasks)} tasks)")
     except DadoError as exc:
@@ -337,7 +354,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             finish = text.find("\n---", 4)
             front = yaml.safe_load(text[4:finish]) or {}
             model = front.get("model")
-            if model and available and model not in available:
+            if model and available and model.split("#", 1)[0] not in {entry.split("#", 1)[0] for entry in available}:
                 raise ValidationError(f"configured model is not in current `opencode models`: {model}")
             print(f"Agent {role}: valid" + (f" ({model})" if model else " (inherits OpenCode default)"))
         except (yaml.YAMLError, DadoError, AttributeError) as exc:
@@ -379,7 +396,7 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--project"); validate.set_defaults(func=_cmd_validate)
     models = sub.add_parser("models", help="select real OpenCode models for DADO agents")
     models.add_argument("--project"); models.add_argument("--opencode", default="opencode"); models.add_argument("--list", action="store_true")
-    models.add_argument("--model", help="model ID or inherit"); models.add_argument("--roles", nargs="*")
+    models.add_argument("--model", help="model ID or inherit"); models.add_argument("--variant", help="model-specific variant ID, or none to clear"); models.add_argument("--roles", nargs="*")
     models.set_defaults(func=_cmd_models)
     resume = sub.add_parser("resume", help="reconcile interrupted work")
     resume.add_argument("id"); resume.add_argument("--project"); resume.set_defaults(func=lambda a: _resume(a))
@@ -396,15 +413,19 @@ def build_parser() -> argparse.ArgumentParser:
     p = ws.add_parser("state"); p.add_argument("id"); p.add_argument("status", choices=["discovery", "planning", "awaiting_approval", "executing", "blocked", "completed", "cancelled"]); p.add_argument("--project"); p.set_defaults(func=_cmd_work_state)
     p = ws.add_parser("focus"); p.add_argument("id"); p.add_argument("--project"); p.set_defaults(func=_cmd_work_focus)
     p = ws.add_parser("approve"); p.add_argument("id"); p.add_argument("--note", required=True, help="record concise user approval text"); p.add_argument("--project"); p.set_defaults(func=_cmd_work_approve)
+    p = ws.add_parser("link-commit", help="link an existing Git commit to a completed archived work")
+    p.add_argument("id"); p.add_argument("commit"); p.add_argument("--project"); p.set_defaults(func=_cmd_link_commit)
     task = sub.add_parser("task", help="manage structured task packets")
     ts = task.add_subparsers(dest="task_command", required=True)
     for cmd in ("add", "state", "result", "invalidate", "verify"):
         p = ts.add_parser(cmd); p.add_argument("id"); p.add_argument("--project")
-        if cmd == "add": p.add_argument("packet")
+        if cmd == "add": p.add_argument("packet", help="packet YAML file or - for stdin")
         elif cmd == "state": p.add_argument("task"); p.add_argument("state", choices=["ready", "running", "review", "blocked", "failed", "cancelled", "stale"])
-        elif cmd == "result": p.add_argument("packet")
+        elif cmd == "result": p.add_argument("packet", help="result YAML file or - for stdin")
         elif cmd == "verify":
             p.add_argument("task"); p.add_argument("verdict", choices=["PASS", "FAIL", "BLOCKED"]); p.add_argument("--check", action="append"); p.add_argument("--evidence", action="append")
+            p.add_argument("--paths-checked", action="store_true", help="verifier independently inspected changed paths (including none)")
+            p.add_argument("--changed", action="append", help="independently observed changed path; requires --paths-checked")
         else: p.add_argument("task"); p.add_argument("reason")
         p.set_defaults(func={"add": _cmd_task_add, "state": _cmd_task_state, "result": _cmd_result, "invalidate": _cmd_invalidate, "verify": _cmd_verify}[cmd])
     req = sub.add_parser("requirement", help="record spec requirement state")

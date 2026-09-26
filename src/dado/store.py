@@ -76,22 +76,18 @@ class Store:
         with file_lock(self.root / ".state"):
             if path.exists():
                 raise ConflictError(f"Work already exists: {work_id}")
-            for sub in ("tasks", "results", "evidence", "verification"):
+            for sub in ("tasks", "evidence"):
                 (path / sub).mkdir(parents=True, exist_ok=True)
             now = datetime.now(timezone.utc).isoformat()
             git = self._git_metadata()
             work = {"id": work_id, "title": title, "status": "discovery", "created_at": now,
                     "updated_at": now, "base_commit": git.get("commit"), "branch": git.get("branch"),
-                    "final_commit": None, "requirements": [], "plan_approved": False}
+                    "final_commit": None, "requirements": [], "decisions": []}
             self._schema_validate("work", work)
             write_yaml(path / "work.yaml", work)
             atomic_write(path / "request.md", f"# Original user request\n\n{request.rstrip()}\n\n## User clarifications and changes\n\n<!-- Append dated user-provided changes. Do not rewrite original request. -->\n")
-            atomic_write(path / "spec.md", "# Specification\n\n<!-- Add stable REQ-NNN sections after targeted discovery. -->\n")
-            atomic_write(path / "decisions.md", "# Decisions\n\n")
-            plan = {"version": 1, "tasks": []}
-            write_yaml(path / "plan.yaml", plan)
             index = self._validate_index()
-            index["active"].append({"id": work_id, "title": title, "status": "discovery", "path": f"active/{work_id}", "created_at": now[:10]})
+            index["active"].append({"id": work_id, "path": f"active/{work_id}"})
             index["focused"] = work_id
             self._schema_validate("index", index)
             write_yaml(self.index_path, index)
@@ -99,7 +95,11 @@ class Store:
         return path
 
     def list_active(self) -> list[dict[str, Any]]:
-        return self._validate_index()["active"]
+        items = []
+        for item in self._validate_index()["active"]:
+            work = self.load_work(self.work_path(item["id"]))
+            items.append({**item, **{key: work[key] for key in ("title", "status", "created_at")}})
+        return items
 
     def focus_work(self, work_id: str) -> None:
         # Validate active-path membership before changing the compact discovery index.
@@ -111,7 +111,7 @@ class Store:
             append_event(self.root, "work_focused", work=work_id)
 
     def work_path(self, work_id: str) -> Path:
-        item = next((x for x in self.list_active() if x["id"] == work_id), None)
+        item = next((x for x in self._validate_index()["active"] if x["id"] == work_id), None)
         if not item:
             raise ValidationError(f"No active work {work_id}; archives are cold storage")
         path = (self.root / item["path"]).resolve()
@@ -119,22 +119,60 @@ class Store:
             raise ValidationError("Work path escapes active directory")
         return path
 
+    def link_commit(self, work_id: str, revision: str) -> str:
+        """Associate an existing Git commit with an explicitly selected completed archive."""
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{2,90}", work_id):
+            raise ValidationError("Invalid work ID")
+        if not re.fullmatch(r"[0-9a-fA-F]{7,64}", revision):
+            raise ValidationError("Commit must be a Git hash (7-64 hexadecimal characters)")
+        try:
+            sha = subprocess.check_output(
+                ["git", "rev-parse", "--verify", f"{revision}^{{commit}}"],
+                cwd=self.project, text=True, stderr=subprocess.DEVNULL, timeout=10,
+            ).strip().lower()
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            raise ValidationError("Commit does not exist in this project's Git repository") from exc
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
+            raise ValidationError("Git did not return a canonical commit hash")
+        with file_lock(self.root / ".state"):
+            matches = [p for p in (self.root / "archive").glob(f"*/{work_id}") if p.is_dir()]
+            if len(matches) != 1:
+                raise ValidationError(f"Expected one archived work {work_id}; found {len(matches)}")
+            path = matches[0].resolve()
+            if not path.is_relative_to((self.root / "archive").resolve()):
+                raise ValidationError("Archive path escapes DADO work directory")
+            work = self.load_work(path)
+            if work["id"] != work_id or work["status"] != "completed":
+                raise ValidationError("Only a completed archived work can be linked to a commit")
+            commits = work.setdefault("related_commits", [])
+            if sha not in commits:
+                commits.append(sha)
+                self._schema_validate("work", work)
+                write_yaml(path / "work.yaml", work)
+                append_event(self.root, "commit_linked", work=work_id, commit=sha)
+        return sha
+
     def load_tasks(self, path: Path) -> list[dict[str, Any]]:
-        plan = read_yaml(path / "plan.yaml", {})
-        self._schema_validate("plan", plan)
-        graph = plan.get("tasks", [])
-        tasks = [read_yaml(packet) for packet in sorted((path / "tasks").glob("T-*.yaml"))]
+        packets = sorted((path / "tasks").glob("T-*.yaml"))
+        tasks = [read_yaml(packet) for packet in packets]
         if any(not isinstance(task, dict) for task in tasks):
             raise ValidationError("Task packet is empty or corrupt")
-        expected = {item["id"]: item.get("depends_on", []) for item in graph}
-        if len(expected) != len(graph):
-            raise ValidationError("Plan DAG contains duplicate task IDs")
-        actual = {task.get("id"): task.get("depends_on", []) for task in tasks}
-        if expected != actual:
-            raise ValidationError("Task packets and plan DAG disagree; preserve artifacts and reconcile manually")
+        if any(task.get("id") != packet.stem for task, packet in zip(tasks, packets)):
+            raise ValidationError("Task packet ID disagrees with its filename")
+        if (path / "plan.yaml").exists():
+            plan = read_yaml(path / "plan.yaml")
+            self._schema_validate("plan", plan)
+            graph = plan["tasks"]
+            expected = {item["id"]: item["depends_on"] for item in graph}
+            if len(expected) != len(graph) or expected != {t.get("id"): t.get("depends_on", []) for t in tasks}:
+                raise ValidationError("Task packets and plan DAG disagree; preserve artifacts and reconcile manually")
         validate_dag(tasks)
         for task in tasks:
             self._schema_validate("task", task)
+            if "result" in task:
+                self._schema_validate("result", task["result"])
+            if "verdict" in task:
+                self._schema_validate("verification", task["verdict"])
             self._validate_task_scope(task)
         return tasks
 
@@ -158,11 +196,12 @@ class Store:
                 raise ConflictError(f"Requirement already exists: {requirement.get('id')}")
             work["requirements"].append(requirement)
             self._schema_validate("work", work)
-            spec = path / "spec.md"
-            body = "\n".join(f"- {criterion}" for criterion in requirement["acceptance"])
-            section = (f"\n## {requirement['id']} — {requirement['description']}\n\n"
-                       f"Source: {requirement['source']}\n\nStatus: {requirement['status']}\n\nAcceptance:\n{body}\n")
-            atomic_write(spec, spec.read_text(encoding="utf-8").rstrip() + "\n" + section)
+            if (path / "spec.md").exists():
+                spec = path / "spec.md"
+                body = "\n".join(f"- {criterion}" for criterion in requirement["acceptance"])
+                section = (f"\n## {requirement['id']} — {requirement['description']}\n\n"
+                           f"Source: {requirement['source']}\n\nStatus: {requirement['status']}\n\nAcceptance:\n{body}\n")
+                atomic_write(spec, spec.read_text(encoding="utf-8").rstrip() + "\n" + section)
             write_yaml(path / "work.yaml", work)
             append_event(self.root, "requirement_created", work=work_id, requirement=requirement["id"])
 
@@ -178,26 +217,28 @@ class Store:
             if status == "waived" and not (reason or "").strip():
                 raise ValidationError("Waiving a requirement requires a concise rationale")
             requirement["status"] = status
+            if status == "waived" and not (path / "decisions.md").exists():
+                self._add_decision(work, f"Waive {requirement_id}", reason.strip(), [requirement_id], [])
             self._schema_validate("work", work)
             write_yaml(path / "work.yaml", work)
-            if status == "waived":
+            if status == "waived" and (path / "decisions.md").exists():
                 decisions = path / "decisions.md"
                 content = decisions.read_text(encoding="utf-8")
                 numbers = [int(n) for n in re.findall(r"^## DEC-(\d{3,})\b", content, re.M)]
                 decision_id = f"DEC-{max(numbers, default=0) + 1:03d}"
                 block = f"\n## {decision_id} — Waive {requirement_id}\n\nDate: {datetime.now(timezone.utc).date().isoformat()}\n\nRationale: {reason.strip()}\n\nRequirements: {requirement_id}\n\nTasks: none\n"
                 atomic_write(decisions, content.rstrip() + "\n" + block)
-            spec = path / "spec.md"
-            content = spec.read_text(encoding="utf-8")
-            marker = f"## {requirement_id} "
-            start = content.find(marker)
-            if start >= 0:
-                next_section = content.find("\n## ", start + len(marker))
-                end = next_section if next_section >= 0 else len(content)
-                section = content[start:end]
-                section = re.sub(r"(?m)^Status: .*?$", f"Status: {status}", section)
-                content = content[:start] + section + content[end:]
-                atomic_write(spec, content)
+            if (path / "spec.md").exists():
+                spec = path / "spec.md"
+                content = spec.read_text(encoding="utf-8")
+                marker = f"## {requirement_id} "
+                start = content.find(marker)
+                if start >= 0:
+                    next_section = content.find("\n## ", start + len(marker))
+                    end = next_section if next_section >= 0 else len(content)
+                    section = content[start:end]
+                    section = re.sub(r"(?m)^Status: .*?$", f"Status: {status}", section)
+                    atomic_write(spec, content)
             append_event(self.root, "requirement_status_changed", work=work_id, requirement=requirement_id, status=status)
 
     def _validate_contract(self, path: Path, work: dict[str, Any]) -> None:
@@ -208,12 +249,13 @@ class Store:
         req_ids = [r["id"] for r in requirements]
         if len(req_ids) != len(set(req_ids)):
             raise ValidationError("Work contains duplicate requirement IDs")
-        spec_text = (path / "spec.md").read_text(encoding="utf-8")
-        for requirement in requirements:
-            if not re.search(rf"(?m)^## {re.escape(requirement['id'])}(?:\s|$)", spec_text):
-                raise ValidationError(f"{requirement['id']} is missing from spec.md")
+        if (path / "spec.md").exists():
+            spec_text = (path / "spec.md").read_text(encoding="utf-8")
+            for requirement in requirements:
+                if not re.search(rf"(?m)^## {re.escape(requirement['id'])}(?:\s|$)", spec_text):
+                    raise ValidationError(f"{requirement['id']} is missing from spec.md")
         waived = [r["id"] for r in requirements if r.get("status") == "waived"]
-        decisions_text = (path / "decisions.md").read_text(encoding="utf-8")
+        decisions_text = (path / "decisions.md").read_text(encoding="utf-8") if (path / "decisions.md").exists() else "\n".join(d["text"] for d in work.get("decisions", []))
         for requirement_id in waived:
             if f"Waive {requirement_id}" not in decisions_text:
                 raise ValidationError(f"Waived requirement {requirement_id} lacks its auditable decision/rationale")
@@ -230,13 +272,14 @@ class Store:
         validate_dag(tasks)
         for task in tasks:
             self._schema_validate("task", task)
-        # Individual task packets are canonical; plan.yaml is only the compact graph index.
+        # Task packets are the graph; old work keeps its legacy plan index.
         for task in tasks:
             write_yaml(path / "tasks" / f"{task['id']}.yaml", task)
-        graph = [{"id": t["id"], "depends_on": t.get("depends_on", [])} for t in tasks]
-        plan = {"version": 1, "tasks": graph}
-        self._schema_validate("plan", plan)
-        write_yaml(path / "plan.yaml", plan)
+        if (path / "plan.yaml").exists():
+            graph = [{"id": t["id"], "depends_on": t.get("depends_on", [])} for t in tasks]
+            plan = {"version": 1, "tasks": graph}
+            self._schema_validate("plan", plan)
+            write_yaml(path / "plan.yaml", plan)
 
     def add_task(self, work_id: str, packet: dict[str, Any]) -> None:
         path = self.work_path(work_id)
@@ -266,12 +309,17 @@ class Store:
             task = next((t for t in tasks if t["id"] == task_id), None)
             if task is None:
                 raise ValidationError(f"Unknown task {task_id}")
+            work = self.load_work(path)
+            if work["status"] in {"cancelled", "completed"} and state not in {"blocked", "failed", "cancelled", "stale"}:
+                raise ValidationError(f"Cannot advance a task in terminal work state {work['status']}")
             if state == "done":
                 raise ValidationError("A task can become done only through an independent verifier result")
             if state == "running":
                 self._assert_plan_approved(work_id, path)
+                if task not in ready_tasks(tasks, self.load_config().get("scheduler", {}).get("max_parallel_workers", 3)):
+                    raise ValidationError(f"{task_id} is not runnable: capacity or scope conflict")
             if state == "review":
-                worker_result = read_yaml(path / "results" / f"{task_id}.yaml", {})
+                worker_result = self._result(path, task)
                 if worker_result.get("status") != "completed":
                     raise ValidationError("A completed worker Result Packet must exist before independent review")
             if state in {"ready", "running", "review", "done"} and any(next(x for x in tasks if x["id"] == d)["status"] != "done" for d in task.get("depends_on", [])):
@@ -280,6 +328,9 @@ class Store:
             transition(task, state)
             if state == "running":
                 task["attempts"] += 1
+                task.pop("result", None)
+                task.pop("verdict", None)
+                task["started_contract_hash"] = self._task_contract_hash(path, task)
                 work = read_yaml(path / "work.yaml")
                 if work["status"] in {"completed", "cancelled"}:
                     raise ValidationError(f"Cannot start a task in terminal work state {work['status']}")
@@ -287,16 +338,21 @@ class Store:
                     work["status"] = "executing"
                     work["updated_at"] = datetime.now(timezone.utc).isoformat()
                     write_yaml(path / "work.yaml", work)
-                    index = self._validate_index()
-                    for item in index["active"]:
-                        if item["id"] == work_id:
-                            item["status"] = "executing"
-                    write_yaml(self.index_path, index)
+                if (path / "plan.yaml").exists():
+                    # Preserve superseded legacy packets without mistaking them for this run after a crash.
+                    old_result = path / "results" / f"{task_id}.yaml"
+                    old_verdict = path / "verification" / f"{task_id}.yaml"
+                    if old_result.exists() or old_verdict.exists():
+                        write_yaml(path / "evidence" / "attempts" / f"{task_id}-{task['attempts'] - 1:03d}.yaml",
+                                   {"result": read_yaml(old_result), "verdict": read_yaml(old_verdict)})
+                    old_result.unlink(missing_ok=True)
+                    old_verdict.unlink(missing_ok=True)
                 append_event(self.root, "task_started", work=work_id, task=task_id, attempt=task["attempts"])
             self.save_tasks(path, tasks)
             append_event(self.root, "task_state_changed", work=work_id, task=task_id, previous=previous, status=state)
 
-    def verify_task(self, work_id: str, task_id: str, verdict: str, checks: list[str], evidence: list[str] | None = None) -> None:
+    def verify_task(self, work_id: str, task_id: str, verdict: str, checks: list[str], evidence: list[str] | None = None,
+                    checked_paths: list[str] | None = None) -> None:
         if verdict not in {"PASS", "FAIL", "BLOCKED"}:
             raise ValidationError("Verifier verdict must be PASS, FAIL, or BLOCKED")
         for ref in evidence or []:
@@ -309,10 +365,25 @@ class Store:
             task = next((t for t in tasks if t["id"] == task_id), None)
             if not task or task["status"] != "review":
                 raise ValidationError(f"{task_id} must be in review before independent verification")
+            if self.load_work(path)["status"] in {"cancelled", "completed"}:
+                raise ValidationError("Cannot verify a task in a terminal work state")
+            if verdict == "PASS":
+                self._assert_plan_approved(work_id, path)
+                self._assert_task_contract(path, task)
+                if checked_paths is None:
+                    raise ValidationError("PASS requires the verifier's independently checked paths (an empty list means no changes)")
+                if sorted(set(checked_paths)) != sorted(set(self._result(path, task).get("changed", []))):
+                    raise ValidationError("Verifier checked paths disagree with the worker result")
+                self._check_scope(task, checked_paths)
             record = {"task": task_id, "verdict": verdict, "checks": checks, "evidence": evidence or [],
                       "verified_at": datetime.now(timezone.utc).isoformat()}
+            if checked_paths is not None:
+                record["checked_paths"] = checked_paths
             self._schema_validate("verification", record)
-            write_yaml(path / "verification" / f"{task_id}.yaml", record)
+            if (path / "plan.yaml").exists():
+                write_yaml(path / "verification" / f"{task_id}.yaml", record)
+            else:
+                task["verdict"] = record
             if verdict == "PASS":
                 task["status"] = "done"
                 task["verified_at"] = record["verified_at"]
@@ -337,22 +408,15 @@ class Store:
                 raise ValidationError(f"Unknown task {result['task']}")
             if task["status"] != "running":
                 raise ValidationError(f"Cannot record worker result while {task['id']} is {task['status']}; expected running")
-            allowed = task.get("scope", {}).get("allowed", [])
-            forbidden = task.get("scope", {}).get("forbidden", [])
-            outside = []
-            for changed in result.get("changed", []):
-                normalized = changed.replace("\\", "/").removeprefix("./")
-                changed_path = PurePosixPath(normalized)
-                if changed_path.is_absolute() or ".." in changed_path.parts or (len(normalized) >= 2 and normalized[1] == ":"):
-                    outside.append(changed)
-                    continue
-                is_allowed = any(scope_matches(normalized, pat) for pat in allowed)
-                is_forbidden = any(scope_matches(normalized, pat) for pat in forbidden)
-                if not is_allowed or is_forbidden:
-                    outside.append(changed)
-            if outside:
-                raise ValidationError(f"Result exceeds declared task scope; escalate for scope expansion: {', '.join(outside)}")
-            write_yaml(path / "results" / f"{result['task']}.yaml", result)
+            if self.load_work(path)["status"] in {"cancelled", "completed"}:
+                raise ValidationError("Cannot record a result in a terminal work state")
+            self._assert_plan_approved(work_id, path)
+            self._assert_task_contract(path, task)
+            self._check_scope(task, result.get("changed", []))
+            if (path / "plan.yaml").exists():
+                write_yaml(path / "results" / f"{result['task']}.yaml", result)
+            else:
+                task["result"] = result
             target = "review" if result["status"] == "completed" else "blocked" if result["status"] == "blocked" else "failed"
             transition(task, target)
             self.save_tasks(path, tasks)
@@ -361,8 +425,34 @@ class Store:
             else:
                 append_event(self.root, "task_blocked" if target == "blocked" else "task_failed", work=work_id, task=task["id"])
 
+    def _check_scope(self, task: dict[str, Any], paths: list[str]) -> None:
+        allowed = task.get("scope", {}).get("allowed", [])
+        forbidden = task.get("scope", {}).get("forbidden", [])
+        outside = []
+        for changed in paths:
+            normalized = changed.replace("\\", "/").removeprefix("./")
+            changed_path = PurePosixPath(normalized)
+            if changed_path.is_absolute() or ".." in changed_path.parts or (len(normalized) >= 2 and normalized[1] == ":"):
+                outside.append(changed)
+                continue
+            is_allowed = any(scope_matches(normalized, pat) for pat in allowed)
+            is_forbidden = any(scope_matches(normalized, pat) for pat in forbidden)
+            if not is_allowed or is_forbidden:
+                outside.append(changed)
+        if outside:
+            raise ValidationError(f"Result exceeds declared task scope; escalate for scope expansion: {', '.join(outside)}")
+
     def ready(self, work_id: str, max_parallel: int = 3) -> list[dict[str, Any]]:
-        return ready_tasks(self.load_tasks(self.work_path(work_id)), max_parallel)
+        path = self.work_path(work_id)
+        if self.load_work(path)["status"] in {"cancelled", "completed"}:
+            return []
+        return ready_tasks(self.load_tasks(path), max_parallel)
+
+    def _result(self, path: Path, task: dict[str, Any]) -> dict[str, Any]:
+        return task.get("result") or read_yaml(path / "results" / f"{task['id']}.yaml", {})
+
+    def _verdict(self, path: Path, task: dict[str, Any]) -> dict[str, Any]:
+        return task.get("verdict") or read_yaml(path / "verification" / f"{task['id']}.yaml", {})
 
     def set_work_status(self, work_id: str, status: str) -> None:
         if status not in {"discovery", "planning", "awaiting_approval", "executing", "blocked", "completed", "cancelled"}:
@@ -386,10 +476,13 @@ class Store:
                 raise ValidationError(f"Invalid work transition: {work['status']} -> {status}")
             if status == "completed":
                 tasks = self.load_tasks(path)
+                self._assert_plan_approved(work_id, path)
                 self._validate_contract(path, work)
+                for task in tasks:
+                    self._assert_task_contract(path, task)
                 if not tasks or any(t["status"] != "done" for t in tasks):
                     raise ValidationError("Work cannot be completed until all tasks are done")
-                if any(read_yaml(path / "verification" / f"{t['id']}.yaml", {}).get("verdict") != "PASS" for t in tasks):
+                if any(self._verdict(path, t).get("verdict") != "PASS" for t in tasks):
                     raise ValidationError("Work cannot be completed without independent PASS evidence")
                 if any(r["status"] not in {"done", "waived"} for r in work["requirements"]):
                     raise ValidationError("Work cannot be completed until requirements are done or explicitly waived")
@@ -397,11 +490,6 @@ class Store:
             work["updated_at"] = datetime.now(timezone.utc).isoformat()
             self._schema_validate("work", work)
             write_yaml(path / "work.yaml", work)
-            index = self._validate_index()
-            for item in index["active"]:
-                if item["id"] == work_id:
-                    item["status"] = status
-            write_yaml(self.index_path, index)
             append_event(self.root, "work_status_changed", work=work_id, status=status)
 
     def promote_knowledge(self, work_id: str, target: str, text: str, source_ref: str) -> None:
@@ -424,6 +512,12 @@ class Store:
             raise ValidationError("Decision and concise rationale are required")
         path = self.work_path(work_id)
         with file_lock(self.root / ".state"):
+            if not (path / "decisions.md").exists():
+                work = self.load_work(path)
+                decision_id = self._add_decision(work, decision, rationale, requirements or [], tasks or [])
+                write_yaml(path / "work.yaml", work)
+                append_event(self.root, "decision_created", work=work_id, decision=decision_id)
+                return decision_id
             file = path / "decisions.md"
             content = file.read_text(encoding="utf-8")
             existing = [int(n) for n in re.findall(r"^## DEC-(\d{3,})\b", content, re.M)]
@@ -436,6 +530,15 @@ class Store:
             atomic_write(file, content.rstrip() + "\n" + block)
             append_event(self.root, "decision_created", work=work_id, decision=decision_id)
             return decision_id
+
+    @staticmethod
+    def _add_decision(work: dict[str, Any], text: str, rationale: str, requirements: list[str], tasks: list[str]) -> str:
+        decisions = work.setdefault("decisions", [])
+        decision_id = f"DEC-{len(decisions) + 1:03d}"
+        decisions.append({"id": decision_id, "text": text, "rationale": rationale,
+                          "date": datetime.now(timezone.utc).date().isoformat(),
+                          "requirements": requirements, "tasks": tasks})
+        return decision_id
 
     def invalidate(self, work_id: str, task_id: str, reason: str) -> list[str]:
         path = self.work_path(work_id)
@@ -450,13 +553,15 @@ class Store:
         """Reconcile running/review work conservatively after restart."""
         path = self.work_path(work_id)
         with file_lock(self.root / ".state"):
+            if self.load_work(path)["status"] in {"cancelled", "completed"}:
+                return []
             tasks = self.load_tasks(path)
             reset = []
             changed = False
             for task in tasks:
                 if task["status"] == "running":
                     # If result reached disk just before a crash, preserve its handoff to verifier.
-                    result = read_yaml(path / "results" / f"{task['id']}.yaml", {})
+                    result = self._result(path, task)
                     if result.get("status") == "completed":
                         task["status"] = "review"
                     elif result.get("status") == "blocked":
@@ -469,7 +574,7 @@ class Store:
                     reset.append(task["id"])
                     changed = True
                 elif task["status"] == "review":
-                    result = read_yaml(path / "verification" / f"{task['id']}.yaml", {})
+                    result = self._verdict(path, task)
                     if result.get("verdict") == "PASS":
                         self._schema_validate("verification", result)
                         task["status"] = "done"
@@ -486,29 +591,37 @@ class Store:
     def archive(self, work_id: str) -> Path:
         path = self.work_path(work_id)
         with file_lock(self.root / ".state"):
+            dest = self.root / "archive" / str(datetime.now().year) / work_id
+            if dest.exists():
+                raise ConflictError(f"Archive destination already exists: {dest}")
             work = read_yaml(path / "work.yaml")
             tasks = self.load_tasks(path)
             self._schema_validate("work", work)
-            self._validate_contract(path, work)
-            if not tasks or any(t["status"] != "done" for t in tasks):
-                raise ValidationError("Cannot archive: every task must be independently verified and done")
-            for task in tasks:
-                verification = read_yaml(path / "verification" / f"{task['id']}.yaml", {})
-                if verification.get("verdict") != "PASS":
-                    raise ValidationError(f"Cannot archive: {task['id']} lacks independent PASS evidence")
-                self._schema_validate("verification", verification)
-            if any(r.get("status") not in {"done", "waived"} for r in work.get("requirements", [])):
-                raise ValidationError("Cannot archive: all requirements must be done or explicitly waived")
-            work["status"] = "completed"
+            if work["status"] != "cancelled":
+                self._assert_plan_approved(work_id, path)
+                self._validate_contract(path, work)
+                for task in tasks:
+                    self._assert_task_contract(path, task)
+                if not tasks or any(t["status"] != "done" for t in tasks):
+                    raise ValidationError("Cannot archive: every task must be independently verified and done")
+                for task in tasks:
+                    verification = self._verdict(path, task)
+                    if verification.get("verdict") != "PASS":
+                        raise ValidationError(f"Cannot archive: {task['id']} lacks independent PASS evidence")
+                    self._schema_validate("verification", verification)
+                if any(r.get("status") not in {"done", "waived"} for r in work.get("requirements", [])):
+                    raise ValidationError("Cannot archive: all requirements must be done or explicitly waived")
+                work["status"] = "completed"
+            elif any(t["status"] in {"running", "review"} for t in tasks):
+                raise ValidationError("Cannot archive cancelled work with running or reviewing tasks; reconcile them first")
             work["updated_at"] = datetime.now(timezone.utc).isoformat()
-            work["final_commit"] = self._git_metadata().get("commit")
+            if work["status"] == "completed":
+                head = self._git_metadata().get("commit")
+                work["final_commit"] = head if head != work.get("base_commit") else None
             write_yaml(path / "work.yaml", work)
             summary = self._summary(work, tasks, path)
             atomic_write(path / "summary.md", summary)
-            dest = self.root / "archive" / str(datetime.now().year) / work_id
             dest.parent.mkdir(parents=True, exist_ok=True)
-            if dest.exists():
-                raise ConflictError(f"Archive destination already exists: {dest}")
             shutil.move(str(path), str(dest))
             index = self._validate_index()
             index["active"] = [x for x in index["active"] if x["id"] != work_id]
@@ -520,13 +633,16 @@ class Store:
 
     def _summary(self, work: dict[str, Any], tasks: list[dict[str, Any]], path: Path) -> str:
         requirements = "\n".join(f"- {r['id']}: {r.get('status', 'unknown')} — {r.get('description', '')}" for r in work.get("requirements", [])) or "- No structured requirements recorded."
-        decisions = (path / "decisions.md").read_text(encoding="utf-8")
+        decisions = ((path / "decisions.md").read_text(encoding="utf-8") if (path / "decisions.md").exists()
+                     else "\n".join(f"- {d['id']}: {d['text']} — {d['rationale']}" for d in work.get("decisions", [])))
         request = (path / "request.md").read_text(encoding="utf-8")
         objective = request.split("## User clarifications and changes", 1)[0].replace("# Original user request", "", 1).strip()
         objective = objective[:1000] + ("…" if len(objective) > 1000 else "")
-        changed = sorted({f for t in tasks for f in (read_yaml(path / "results" / f"{t['id']}.yaml", {}).get("changed", []))})
-        checks = sorted({v for t in tasks for v in (read_yaml(path / "verification" / f"{t['id']}.yaml", {}).get("checks", []))})
-        return (f"# {work['title']}\n\n## Objective\n\n{objective}\n\n## Result\n\nCompleted and independently verified {len(tasks)} task(s).\n\n## Requirements\n\n{requirements}\n\n## Decisions\n\n{decisions}\n\n## Changed files\n\n" + "\n".join(f"- `{x}`" for x in changed) + "\n\n## Independent verification\n\n" + "\n".join(f"- {x}" for x in checks) + f"\n\nFinal commit: `{work.get('final_commit') or 'not recorded'}`\n")
+        if work["status"] == "cancelled":
+            return f"# {work['title']}\n\nStatus: cancelled\n\n## Original request\n\n{objective}\n\nNo completion or verification is implied.\n"
+        changed = sorted({f for t in tasks for f in self._result(path, t).get("changed", [])})
+        checks = sorted({v for t in tasks for v in self._verdict(path, t).get("checks", [])})
+        return (f"# {work['title']}\n\n## Objective\n\n{objective}\n\n## Result\n\nCompleted and independently verified {len(tasks)} task(s).\n\n## Requirements\n\n{requirements}\n\n## Decisions\n\n{decisions}\n\n## Changed files\n\n" + "\n".join(f"- `{x}`" for x in changed) + "\n\n## Independent verification\n\n" + "\n".join(f"- {x}" for x in checks) + f"\n\nHEAD at close (if changed since start): `{work.get('final_commit') or 'not recorded'}`\n")
 
     def _git_metadata(self) -> dict[str, str | None]:
         def git(*args: str) -> str | None:
@@ -538,7 +654,7 @@ class Store:
 
     def _approval_hash(self, path: Path) -> str:
         digest = hashlib.sha256()
-        files = [path / "request.md", path / "spec.md", path / "plan.yaml"]
+        files = [path / "request.md"] + [p for name in ("spec.md", "plan.yaml") if (p := path / name).exists()]
         for file in files:
             digest.update(file.relative_to(path).as_posix().encode())
             digest.update(b"\0")
@@ -548,7 +664,7 @@ class Store:
             digest.update(content)
             digest.update(b"\0")
         for task in self.load_tasks(path):
-            contract = {key: value for key, value in task.items() if key not in {"status", "attempts", "verified_at"}}
+            contract = {key: value for key, value in task.items() if key not in {"status", "attempts", "verified_at", "result", "verdict", "started_contract_hash"}}
             digest.update(json.dumps(contract, sort_keys=True, ensure_ascii=False).encode())
             digest.update(b"\0")
         work = read_yaml(path / "work.yaml")
@@ -556,7 +672,21 @@ class Store:
                          "status": "waived" if item.get("status") == "waived" else "<mutable>"}
                         for item in work.get("requirements", [])]
         digest.update(json.dumps(requirements, sort_keys=True, ensure_ascii=False).encode())
+        digest.update(json.dumps(work.get("decisions", []), sort_keys=True, ensure_ascii=False).encode())
         return digest.hexdigest()
+
+    def _task_contract_hash(self, path: Path, task: dict[str, Any]) -> str:
+        contract = {key: value for key, value in task.items()
+                    if key not in {"status", "attempts", "verified_at", "result", "verdict", "started_contract_hash"}}
+        work = self.load_work(path)
+        requirements = [{key: value for key, value in req.items() if key != "status"}
+                        for req in work["requirements"] if req["id"] in task["satisfies"]]
+        payload = {"task": contract, "requirements": requirements}
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+    def _assert_task_contract(self, path: Path, task: dict[str, Any]) -> None:
+        if task.get("started_contract_hash") and task["started_contract_hash"] != self._task_contract_hash(path, task):
+            raise ValidationError(f"Task {task['id']} contract changed since execution; invalidate and rerun it")
 
     def approve_work(self, work_id: str, note: str) -> None:
         if not note.strip():
@@ -566,28 +696,29 @@ class Store:
             work = read_yaml(path / "work.yaml")
             if work["status"] != "awaiting_approval":
                 raise ValidationError(f"Cannot approve a plan in work state {work['status']}")
+            if any(task["status"] in {"running", "review"} for task in self.load_tasks(path)):
+                raise ValidationError("Cannot reapprove while tasks are running or awaiting review; reconcile them first")
             self._validate_contract(path, work)
             record = {"approved": True, "approved_at": datetime.now(timezone.utc).isoformat(),
                       "approval_note": note.strip(), "artifact_hash": self._approval_hash(path)}
-            write_yaml(path / "approval.yaml", record)
-            work["plan_approved"] = True
+            if (path / "plan.yaml").exists():
+                write_yaml(path / "approval.yaml", record)
+            else:
+                work["approval"] = {key: record[key] for key in ("approved_at", "approval_note", "artifact_hash")}
+            if (path / "plan.yaml").exists():
+                work["plan_approved"] = True
             work["status"] = "executing"
             work["updated_at"] = record["approved_at"]
             self._schema_validate("work", work)
             write_yaml(path / "work.yaml", work)
-            index = self._validate_index()
-            for item in index["active"]:
-                if item["id"] == work_id:
-                    item["status"] = "executing"
-            write_yaml(self.index_path, index)
             append_event(self.root, "plan_approved", work=work_id)
 
     def _assert_plan_approved(self, work_id: str, path: Path) -> None:
         if not self.load_config().get("approval", {}).get("plan", True):
             return
         work = read_yaml(path / "work.yaml")
-        approval = read_yaml(path / "approval.yaml", {})
-        if not work.get("plan_approved") or approval.get("approved") is not True:
+        approval = work.get("approval") or read_yaml(path / "approval.yaml", {})
+        if not work.get("approval") and (not work.get("plan_approved") or approval.get("approved") is not True):
             raise ValidationError("Plan requires explicit approval before task execution")
         if approval.get("artifact_hash") != self._approval_hash(path):
             raise ValidationError("Approved spec/plan/tasks changed; review and approve the revised plan again")

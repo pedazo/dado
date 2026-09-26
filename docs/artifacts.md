@@ -2,20 +2,19 @@
 
 ```text
 .dado/
-  config.yaml                 # DADO-only policy; no duplicate OpenCode model config
+  config.yaml                 # DADO-only policy; model selection is in OpenCode agents
   managed-files.json          # ownership hashes for non-destructive updates
   work/
-    index.yaml                # tiny active-work discovery index and focused ID
+    index.yaml                # active-work IDs/paths and focused ID; statuses live in work.yaml
     project/{architecture,conventions,constraints,decisions}.md
     events.jsonl              # append-only state audit
     active/<work-id>/
-      work.yaml request.md spec.md decisions.md plan.yaml
-      tasks/T-NNN.yaml results/T-NNN.yaml verification/T-NNN.yaml evidence/
+      work.yaml request.md tasks/T-NNN.yaml evidence/
     archive/<year>/<work-id>/  # same artifacts plus summary.md
 ```
 
-`work.yaml` carries requirement IDs/status/provenance, work state, plan approval state and Git base/branch/final commit. `approval.yaml` records the user's explicit approval and a fingerprint of the request/spec/task contract (mutable status fields excluded), so contract edits require reapproval. Decisions are auditable but adding a rationale alone does not force reapproval; if it changes the contract, revise the spec/task packet and re-approve. `request.md` distinguishes its immutable original request from appended dated user changes. `spec.md` remains concise; each requirement has stable `REQ-NNN`, acceptance, source and status. Decision records are conclusions/rationale rather than reasoning traces.
+`work.yaml` carries work state, requirements with `REQ-NNN` acceptance/provenance/status, concise decisions, Git metadata, and explicit approval with a fingerprint of the request and task contract (mutable status and outcomes excluded). Contract edits require reapproval. An optional `related_commits` list can be added to a completed archived work after a user-requested commit; it does not alter approval or completion. `request.md` preserves the original request and appended dated clarifications.
 
-`plan.yaml` is only the compact dependency graph index; the individual `tasks/T-NNN.yaml` packets are canonical. On load, DADO rejects disagreement between packet IDs/dependencies and the graph. The graph is checked for missing IDs, cycles, duplicate IDs, impossible dependency/status combinations and invalid task schemas. A task packet includes goal, requirements, dependencies, allowed/forbidden file scopes, context references, acceptance, verification, risk and attempts. A result is compact and separate from verifier evidence. `verification/T-NNN.yaml` captures independent verdict/checks/time.
+The task packets are the dependency graph: DADO checks missing IDs, cycles, duplicates, invalid status/dependency combinations and schemas. Each packet includes goal, requirements, scope, context references, acceptance, checks and risk. Its `result` (worker claim) and `verdict` (independent assessment, including checked paths) are distinct fields, recorded only by their respective CLI operations. Changed contracts must be reapproved; tasks whose criteria changed since their start must be invalidated and rerun. Cancelled work may be archived without claiming completion after running/reviewing tasks are reconciled. Existing work using the earlier split-file format remains readable and writable; results from previous legacy attempts are preserved under `evidence/attempts/` on retry.
 
-Structured work, index, config, plan, task, worker-result, and verifier-result artifacts have JSON Schema under package `schemas/` and copied project `.dado/schemas/`. YAML is safe-loaded; invalid state stops operations rather than being silently repaired. Evidence logs are selectively loaded and ignored from Git by default. Archive summaries are intentionally enough for cold-storage discovery without opening complete artifacts.
+Structured work, index, config, task, worker-result, and verifier-result artifacts are validated with packaged JSON Schemas. YAML is safe-loaded; invalid state stops operations rather than being silently repaired. Evidence is loaded only when needed. Whether DADO data is version-controlled is decided by the host project. Archive summaries support cold-storage discovery without loading full artifacts.

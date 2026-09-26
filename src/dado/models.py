@@ -6,6 +6,8 @@ import subprocess
 import time
 from pathlib import Path
 
+import yaml
+
 from .errors import DadoError, ValidationError
 from .fs import atomic_write
 
@@ -30,9 +32,13 @@ def catalog(executable: str = "opencode") -> list[str]:
     raise DadoError(f"Could not query `opencode models` after three attempts: {last_error}") from last_error
 
 
-def set_agent_model(path: Path, model: str | None, available: list[str]) -> None:
-    if model is not None and model not in available:
+def set_agent_model(path: Path, model: str | None, available: list[str], variant: str | None = None) -> None:
+    if model is not None and model.split("#", 1)[0] not in {item.split("#", 1)[0] for item in available}:
         raise ValidationError(f"Model is not in current OpenCode catalog: {model}")
+    if variant is not None and (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", variant) or model is None or "#" in model):
+        raise ValidationError("Variant requires a selected base model and a valid variant ID")
+    if variant:
+        model = f"{model}#{variant}"
     text = path.read_text(encoding="utf-8")
     if not text.startswith("---\n"):
         raise ValidationError(f"Missing YAML frontmatter in {path}")
@@ -55,3 +61,11 @@ def set_agent_model(path: Path, model: str | None, available: list[str]) -> None
             lines.append(value)
     updated = "---\n" + "\n".join(lines) + text[end:]
     atomic_write(path, updated)
+
+
+def agent_model(path: Path) -> str | None:
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---\n") or "\n---" not in text[4:]:
+        raise ValidationError(f"Malformed YAML frontmatter in {path}")
+    front = yaml.safe_load(text[4:text.find("\n---", 4)]) or {}
+    return front.get("model")

@@ -9,6 +9,7 @@ Conversation history is optional. Start in the same project and run `dado status
 | Result recorded as `review` | Keep task in review and rerun only the independent verifier unless durable PASS was already recorded. |
 | Verification PASS recorded | Task remains done; don't repeat. |
 | During archive | Artifact move and index update are not a multi-file transaction. `doctor`/manual inspection required if interruption splits these operations; no archive is silently reconstructed. |
+| Cancelled work | May be archived with a cancellation summary, even if no plan or verification was created, after running/reviewing tasks have been reconciled. Its status remains `cancelled`. |
 
 Atomic file replace limits corruption of individual artifacts. A process-wide lock serializes local mutations, but multi-artifact work creation/archive is not a transactional database; event log and filesystem/index can be compared. Never automatically delete or rewrite user artifacts to repair state.
 

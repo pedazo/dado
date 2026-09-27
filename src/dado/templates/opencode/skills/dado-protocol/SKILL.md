@@ -13,6 +13,7 @@ description: DADO durable work protocol, artifact boundaries, state recovery, an
 
 ## Route a request
 - For a new trivial, bounded edit, ask the user once whether to make a direct change or use tracked DADO work, unless they already chose. Selecting `dado-master` or `/dado` does not answer this question. Continue focused active work without creating another work.
+- The master can run only `dado ...` shell commands. Any other command (including tests and Git inspection) must be delegated to the appropriate subagent; do not attempt it, retry a denied command, or stop without handing it off. If the subagent itself is blocked by permissions, report that blocker clearly.
 - A direct edit goes to a worker with a concise scope and relevant checks, without work artifacts. A tracked small edit keeps normal approval and independent verification but usually needs only one requirement and one task; avoid unnecessary discovery. Larger or uncertain changes use the durable lifecycle below.
 - Commit/push only on explicit user request. After a confirmed commit, link it to a confidently identified completed archive via `dado work link-commit <work-id> <hash>`; the archive never waits for a commit. Ask the historian only a targeted question about relevant archives. Git is the source of truth for actual committed files.
 

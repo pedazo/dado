@@ -1,0 +1,160 @@
+# SYNTHETIC recorded runs — clearly fixture data, never real measurements.
+# Narrative intent: same DADO protocol with a deep-verify reasoning variant;
+# slower and more tokens than plain dado, cleanest acceptance and no false PASS.
+synthetic: true
+agent: dado_variant_deep_verify
+runs:
+  - case: CASE-small-edit
+    rep: 1
+    acceptance: true
+    latency_seconds: 160
+    tokens_in: 6100
+    tokens_out: 2600
+    cost: 1.15
+    retries: 0
+    human_minutes: 2
+    bugs_injected: 0
+    bugs_found: 0
+    verifier_verdict: PASS
+    rework_minutes: 5
+  - case: CASE-small-edit
+    rep: 2
+    acceptance: true
+    latency_seconds: 150
+    tokens_in: 5900
+    tokens_out: 2500
+    cost: 1.10
+    retries: 0
+    human_minutes: 2
+    bugs_injected: 0
+    bugs_found: 0
+    verifier_verdict: PASS
+    rework_minutes: 5
+  - case: CASE-multfile-bug
+    rep: 1
+    acceptance: true
+    latency_seconds: 600
+    tokens_in: 40000
+    tokens_out: 15000
+    cost: 5.30
+    retries: 0
+    human_minutes: 15
+    bugs_injected: 2
+    bugs_found: 2
+    verifier_verdict: PASS
+    rework_minutes: 10
+  - case: CASE-multfile-bug
+    rep: 2
+    acceptance: true
+    latency_seconds: 580
+    tokens_in: 39000
+    tokens_out: 14500
+    cost: 5.10
+    retries: 0
+    human_minutes: 15
+    bugs_injected: 2
+    bugs_found: 2
+    verifier_verdict: PASS
+    rework_minutes: 10
+  - case: CASE-transversal-change
+    rep: 1
+    acceptance: true
+    latency_seconds: 1250
+    tokens_in: 68000
+    tokens_out: 26000
+    cost: 9.40
+    retries: 0
+    human_minutes: 40
+    bugs_injected: 3
+    bugs_found: 3
+    verifier_verdict: PASS
+    rework_minutes: 20
+  - case: CASE-transversal-change
+    rep: 2
+    acceptance: true
+    latency_seconds: 1200
+    tokens_in: 66000
+    tokens_out: 25000
+    cost: 9.10
+    retries: 0
+    human_minutes: 30
+    bugs_injected: 3
+    bugs_found: 3
+    verifier_verdict: PASS
+    rework_minutes: 20
+  - case: CASE-parallel-research
+    rep: 1
+    acceptance: true
+    latency_seconds: 380
+    tokens_in: 23000
+    tokens_out: 9000
+    cost: 2.60
+    retries: 0
+    human_minutes: 5
+    bugs_injected: 1
+    bugs_found: 1
+    verifier_verdict: PASS
+  - case: CASE-parallel-research
+    rep: 2
+    acceptance: true
+    latency_seconds: 370
+    tokens_in: 22500
+    tokens_out: 8800
+    cost: 2.55
+    retries: 0
+    human_minutes: 5
+    bugs_injected: 1
+    bugs_found: 1
+    verifier_verdict: PASS
+  - case: CASE-sequential-workflow
+    rep: 1
+    acceptance: true
+    latency_seconds: 1900
+    tokens_in: 92000
+    tokens_out: 32000
+    cost: 12.40
+    retries: 0
+    human_minutes: 30
+    bugs_injected: 2
+    bugs_found: 2
+    verifier_verdict: PASS
+    rework_minutes: 10
+  - case: CASE-sequential-workflow
+    rep: 2
+    acceptance: true
+    latency_seconds: 1850
+    tokens_in: 90000
+    tokens_out: 31000
+    cost: 12.10
+    retries: 0
+    human_minutes: 30
+    bugs_injected: 2
+    bugs_found: 2
+    verifier_verdict: PASS
+    rework_minutes: 10
+  - case: CASE-interrupted-resume
+    rep: 1
+    acceptance: true
+    latency_seconds: 520
+    tokens_in: 28000
+    tokens_out: 11000
+    cost: 3.60
+    retries: 0
+    human_minutes: 5
+    bugs_injected: 1
+    bugs_found: 1
+    verifier_verdict: PASS
+    rework_minutes: 5
+  - case: CASE-interrupted-resume
+    rep: 2
+    acceptance: true
+    latency_seconds: 500
+    tokens_in: 27500
+    tokens_out: 10500
+    cost: 3.50
+    retries: 0
+    human_minutes: 5
+    bugs_injected: 1
+    bugs_found: 1
+    verifier_verdict: PASS
+    rework_minutes: 5

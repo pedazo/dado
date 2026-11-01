@@ -26,7 +26,12 @@ def _load_manifest(path: Path) -> dict[str, str]:
 
 
 def install(project: Path, force: bool = False) -> tuple[list[str], list[str]]:
+    project = Path(project)
     opencode = project / ".opencode"
+    # Hardening (ADR 0005): never write into a .opencode that resolves outside
+    # the project; per-target symlink/containment checks follow.
+    if not opencode.resolve().is_relative_to(project.resolve()):
+        raise ConflictError(f".opencode path resolves outside the project; refusing install: {project / '.opencode'}")
     manifest_path = project / ".dado" / "managed-files.json"
     previous = _load_manifest(manifest_path)
     manifest = dict(previous)
@@ -40,11 +45,18 @@ def install(project: Path, force: bool = False) -> tuple[list[str], list[str]]:
         key = relative.as_posix()
         content = source.read_bytes()
         new_hash = hashlib.sha256(content).hexdigest()
+        # Refuse to write through a symbolic link (no overwrite escape).
+        if target.is_symlink():
+            conflicts.append(f"{target}: symbolic link not overwritten (no writes through symlinks)")
+            continue
         if target.exists():
             old_hash = previous.get(key)
             current_hash = hashlib.sha256(target.read_bytes()).hexdigest()
             if old_hash is None:
                 conflicts.append(f"{target}: pre-existing user-owned file preserved")
+                continue
+            if not target.resolve().is_relative_to(opencode.resolve()):
+                conflicts.append(f"{target}: resolves outside .opencode; refusing to overwrite")
                 continue
             if current_hash != old_hash and current_hash != new_hash and not force:
                 conflicts.append(f"{target}: modified managed file preserved; compare with DADO template")
@@ -76,6 +88,9 @@ def uninstall(project: Path, remove_config: bool = False, remove_data: bool = Fa
             preserved.append(f"invalid manifest path: {key!r}")
             continue
         path = project / ".opencode" / key
+        if path.is_symlink():  # never remove through or for a symbolic link
+            preserved.append(f"{str(path.relative_to(project))}: not removed (symbolic link)")
+            continue
         if not path.resolve().is_relative_to((project / ".opencode").resolve()):
             preserved.append(f"invalid manifest path: {key!r}")
             continue

@@ -61,6 +61,7 @@ def validate_dag(tasks: list[dict[str, Any]]) -> list[str]:
 
 def ready_tasks(tasks: list[dict[str, Any]], max_parallel: int = 3) -> list[dict[str, Any]]:
     validate_dag(tasks)
+    by_id = {task["id"]: task for task in tasks}
     running = sum(t["status"] in {"running", "review"} for t in tasks)
     slots = max(0, max_parallel - running)
     if slots == 0:
@@ -70,7 +71,7 @@ def ready_tasks(tasks: list[dict[str, Any]], max_parallel: int = 3) -> list[dict
     for task in tasks:
         if task["status"] not in {"pending", "ready"}:
             continue
-        if not all(next(x for x in tasks if x["id"] == dep)["status"] == "done" for dep in task.get("depends_on", [])):
+        if not all(by_id[dep]["status"] == "done" for dep in task.get("depends_on", [])):
             continue
         scope = task.get("scope", {}).get("allowed", [])
         if any(scopes_overlap(scope, other) for other in [*active_scopes, *(x.get("scope", {}).get("allowed", []) for x in selected)]):
@@ -87,11 +88,24 @@ def scopes_overlap(left: list[str], right: list[str]) -> bool:
         for b in right:
             aa = a.replace("\\", "/").removeprefix("./").rstrip("/")
             bb = b.replace("\\", "/").removeprefix("./").rstrip("/")
+            if aa in {"", "."} or bb in {"", "."}:
+                return True
             if aa == bb or aa.startswith(bb + "/") or bb.startswith(aa + "/"):
                 return True
-            # Glob intersection is hard to prove disjoint (e.g. mid-segment `src*`),
-            # so serialize any task using globs against any other declared scope.
             if any(char in aa + bb for char in "*?["):
+                # Complete literal segments before the first glob can prove
+                # disjointness. Partial segments (src*) cannot do so safely.
+                def prefix(pattern: str) -> tuple[str, ...]:
+                    parts = []
+                    for part in PurePosixPath(pattern).parts:
+                        if any(char in part for char in "*?["):
+                            break
+                        parts.append(part)
+                    return tuple(parts)
+                left_prefix, right_prefix = prefix(aa), prefix(bb)
+                common = min(len(left_prefix), len(right_prefix))
+                if common and left_prefix[:common] != right_prefix[:common]:
+                    continue
                 return True
     return False
 
@@ -128,12 +142,16 @@ def invalidate_closure(tasks: list[dict[str, Any]], task_id: str) -> list[str]:
     if task_id not in by_id:
         raise ValidationError(f"Unknown task {task_id}")
     affected = {task_id}
-    while True:
-        more = {t["id"] for t in tasks if any(dep in affected for dep in t.get("depends_on", []))}
-        new = more - affected
-        if not new:
-            break
-        affected |= new
+    children: dict[str, list[str]] = defaultdict(list)
+    for task in tasks:
+        for dependency in task.get("depends_on", []):
+            children[dependency].append(task["id"])
+    pending = deque([task_id])
+    while pending:
+        for child in children[pending.popleft()]:
+            if child not in affected:
+                affected.add(child)
+                pending.append(child)
     for item in affected:
         if by_id[item]["status"] not in {"cancelled", "stale"}:
             by_id[item]["status"] = "stale"

@@ -1,1 +1,52 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"approval":{"type":"object","properties":{"plan":{"type":"boolean"}},"additionalProperties":false},"scheduler":{"type":"object","properties":{"max_parallel_workers":{"type":"integer","minimum":1,"maximum":32}},"additionalProperties":false},"verification":{"type":"object","properties":{"default_risk":{"enum":["low","medium","high","critical"]}},"additionalProperties":false},"history":{"type":"object","properties":{"automatic_search":{"type":"boolean"}},"additionalProperties":false},"archive":{"type":"object","properties":{"completed":{"type":"boolean"}},"additionalProperties":false}},"additionalProperties":false}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "approval": {"type": "object", "properties": {"plan": {"type": "boolean"}}, "additionalProperties": false},
+    "scheduler": {"type": "object", "properties": {"max_parallel_workers": {"type": "integer", "minimum": 1, "maximum": 32}}, "additionalProperties": false},
+    "verification": {"type": "object", "properties": {"default_risk": {"enum": ["low", "medium", "high", "critical"]}, "require_captured": {"type": "boolean"}, "require_integration": {"type": "boolean"}}, "additionalProperties": false},
+    "history": {"type": "object", "properties": {"automatic_search": {"type": "boolean"}}, "additionalProperties": false},
+    "archive": {"type": "object", "properties": {"completed": {"type": "boolean"}}, "additionalProperties": false},
+    "profiles": {
+      "type": "object",
+      "minProperties": 1,
+      "required": ["default"],
+      "patternProperties": {
+        "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$": {
+          "type": "object",
+          "required": ["dado-master", "dado-explorer", "dado-worker", "dado-verifier", "dado-researcher", "dado-historian"],
+          "properties": {
+            "dado-master": {"$ref": "#/$defs/roleModel"},
+            "dado-explorer": {"$ref": "#/$defs/roleModel"},
+            "dado-worker": {"$ref": "#/$defs/roleModel"},
+            "dado-verifier": {"$ref": "#/$defs/roleModel"},
+            "dado-researcher": {"$ref": "#/$defs/roleModel"},
+            "dado-historian": {"$ref": "#/$defs/roleModel"}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "active_profile": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"}
+  },
+  "allOf": [
+    {"if": {"required": ["profiles"]}, "then": {"required": ["active_profile"]}},
+    {"if": {"required": ["active_profile"]}, "then": {"required": ["profiles"]}}
+  ],
+  "$defs": {
+    "roleModel": {
+      "type": "object",
+      "required": ["model", "variant"],
+      "properties": {
+        "model": {"type": ["string", "null"], "pattern": "^[^/\\s#]+/[^\\s#]+$"},
+        "variant": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"}
+      },
+      "allOf": [
+        {"if": {"properties": {"model": {"type": "null"}}, "required": ["model"]}, "then": {"properties": {"variant": {"type": "null"}}}}
+      ],
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

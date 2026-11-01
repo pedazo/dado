@@ -4,7 +4,7 @@
 
 ## Install
 
-Requires Python 3.10+ and OpenCode V2 (the implementation was checked against OpenCode `v2.0.16`). Install globally with `pipx install .` from this checkout, or use `scripts/install.sh` / `scripts/install.ps1` (which creates an isolated venv when pipx is unavailable). If you manage your own virtual environment, activate it and use `python -m pip install .`.
+Requires Python 3.10+ and OpenCode V2 (the implementation was checked against OpenCode `v2.2.2`). Install globally with `pipx install .` from this checkout, or use `scripts/install.sh` / `scripts/install.ps1` (which creates an isolated venv when pipx is unavailable). If you manage your own virtual environment, activate it and use `python -m pip install .`.
 
 ```sh
 cd /path/to/project
@@ -54,9 +54,12 @@ For example, ask `Fix the login timeout`, `Review the authentication flow for bu
 ### Configure models and operate locally
 
 ```sh
-dado models                               # choose a model and optional variant per agent
+dado models                               # choose roles, provider, model and variant interactively
 dado models --model provider/model --variant high --roles dado-worker
-dado models --variant none --roles dado-worker  # clear a variant
+dado models --variant none --roles dado-worker  # clear a variant in default
+dado models --profile economico --model provider/model --roles dado-worker
+dado profiles list                       # show active and available profiles
+dado profiles use economico               # apply profile to all DADO agents
 dado status                               # focused work and next tasks
 dado work list                            # all active works
 dado work show WORK-ID                    # work contract and task packets
@@ -68,17 +71,37 @@ dado validate                             # validate active task graphs
 dado work link-commit WORK-ID GIT-SHA     # associate a confirmed commit with a completed archive
 ```
 
-Variants are model-specific (for example, reasoning effort); OpenCode determines which variant IDs a model supports. Model and variant selection live in agent frontmatter, not in another DADO registry. `dado` also exposes `work create/state/approve/archive`, `task add/state/result/verify/invalidate`, `requirement add/state`, `decision add` and `promote` for manual operation and agent handoffs. `task add` and `task result` accept `-` to read YAML from stdin instead of creating an extra packet file.
+In OpenCode, `/dado-profile economico` switches profiles; run `/dado-profile` without a name to choose interactively.
+
+Interactive `dado models` displays every role's current model and reasoning variant in the target profile, then lets you choose roles by comma-separated numbers or `all`, a provider, one of that provider's enabled models, and an API-advertised reasoning variant or the model default. It summarizes the proposed assignments and asks for confirmation before saving; `0`, `q` or `quit` cancels without changing config or agents. This interactive catalog comes from OpenCode's location-scoped `/api/model` API. Supplying `--model` or `--variant` (optionally with `--roles`) retains the noninteractive automation path; `--roles` alone scopes which roles are prompted.
+
+Profiles persist per-role model and optional variant selections in `.dado/config.local.yaml` for layout v2; legacy installations retain `.dado/config.yaml` and agent-frontmatter projection until explicit migration. Without `--profile`, `dado models` edits `default`, even when another profile is active. `--profile NAME` creates or edits that profile. New profiles start from `default`; `dado profiles use NAME` selects all DADO roles. In layout v2, start a new `dado host exec` invocation to apply a selection; existing sessions keep their current overlay. Fresh profiles inherit shared OpenCode defaults. Interactive variant choices come from OpenCode's model catalog. `dado` also exposes `work create/state/approve/archive`, `task add/state/result/verify/invalidate`, `requirement add/state`, `decision add` and `promote` for manual operation. `task add` and `task result` accept `-` to read YAML from stdin.
 
 For a manual verification handoff, `dado task verify WORK-ID T-001 PASS --check "..." --paths-checked --changed path/to/file` records an independently checked path; omit `--changed` when there were no file changes. See the [full protocol](docs/protocol.md) for the state transitions and approval rules.
 
 ## Artifacts and context boundaries
 
-`.dado/` contains config, project memory, active work and cold archive. One active work never implicitly reads other work or the archive. Each new tracked work has `request.md`, `work.yaml`, and one packet per task containing its contract, worker result and independent verdict. A completed archive can also record optional `related_commits` in `work.yaml`, including commits requested after archival. Git (`git show GIT-SHA`) remains the source of truth for the exact contents of a commit; association does not gate archival. The host project decides whether to version-control its DADO data. Project memory is explicitly promoted with provenance. Work archive is never auto-loaded.
 
 ## Recovery and acceptance workflow
 
 `dado resume <id>` rebuilds from artifacts. A task left `running` without a durable result is uncertain and returned to `ready` (or `pending` if dependencies are not done); it is never assumed complete. A task in `review` is completed only if independent PASS evidence was persisted. Previously verified tasks remain done. The automated interrupted-run acceptance is covered by `tests/test_runtime.py::test_interrupted_work_recovery_full_acceptance_and_archive`; see [recovery](docs/recovery.md).
+
+## Shared projects, verification and local operations
+
+Fresh `dado init` creates layout v2: `.dado/layout.yaml` carries a shared project UUID; `.dado/config.yaml` contains shared policy; `.dado/config.local.yaml` contains checkout-local model profiles; `.dado/identity` identifies the checkout. Active/archive work, index and event log are operational local state; `.dado/work/project/` is the explicit location for promoted shared knowledge. The generated `.dado/.gitignore` excludes local state but never untracks files already tracked by Git. Legacy projects remain readable in their existing layout until explicitly migrated. Preview migration first, then apply only after reviewing the report:
+
+```sh
+dado migrate --project .
+dado migrate --project . --apply
+dado repair --project .                 # inspect transaction journals only
+dado repair --project . --apply          # explicitly replay pending journals
+```
+
+Model profiles are local in layout v2. They do not rewrite tracked agent files; use `dado host check` to inspect the real host configuration and `dado host exec -- run "<request>"` to launch with the personal overlay. Profile changes require a new wrapper invocation. `inherit` uses the shared host/project default. See [operations and evidence](docs/runtime-operations.md) and [ADR 0006](docs/adr/0006-durable-transactions.md).
+
+`dado check` runs only an explicitly supplied command and stores captured evidence against exact acceptance text; `dado task verify ... --record` and `dado work verify ... --record` consume those records. Captured evidence establishes that a command ran and matched its declared criterion, not that the criterion is complete or the session identity is authentic. A code change invalidates PASS reuse; rerun checks and independent review. Fresh layout-v2 policy enables captured integration checks by default; legacy policy defaults remain unchanged.
+
+Optional budget reservations are admission estimates, not provider billing. Evaluation reports can process synthetic fixtures (not measurements) or externally collected records with provenance. Policy decisions are advisory and do not spawn models. Isolation snapshots are local copies of declared scope, not commits or pushes; integration conflicts preserve the environment and require final verification. These facilities are local coordination, not distributed locks or OS sandboxing.
 
 ## Docs
 
@@ -87,6 +110,7 @@ For a manual verification handoff, `dado task verify WORK-ID T-001 PASS --check 
 - [Artifacts and schemas](docs/artifacts.md)
 - [OpenCode integration](docs/opencode-integration.md)
 - [Recovery](docs/recovery.md)
+- [Runtime operations and evidence](docs/runtime-operations.md)
 - [Architecture decisions](docs/adr/)
 
 ## Limitations

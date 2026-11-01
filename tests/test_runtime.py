@@ -185,6 +185,157 @@ def test_models_variant_selection_and_clear(tmp_path, monkeypatch):
     assert agent_model(path) == "provider/alpha"
 
 
+def test_profile_migration_preserves_legacy_assignments_and_fresh_default_inherits(tmp_path):
+    agents = tmp_path / ".opencode/agents"
+    agents.mkdir(parents=True)
+    legacy = agents / "dado-worker.md"
+    legacy.write_text("---\ndescription: legacy\nmodel: provider/alpha#high\n---\ncustom body\n")
+    Store(tmp_path).init()
+    config = Store(tmp_path).load_config()
+    assert config["active_profile"] == "default"
+    assert config["profiles"]["default"]["dado-worker"] == {"model": "provider/alpha", "variant": "high"}
+    assert config["profiles"]["default"]["dado-master"] == {"model": None, "variant": None}
+    assert agent_model(legacy) == "provider/alpha#high"
+    assert "custom body" in legacy.read_text()
+
+    fresh = tmp_path / "fresh"
+    Store(fresh).init()
+    fresh_config = Store(fresh).load_config()
+    assert fresh_config["profiles"]["default"] == {
+        role: {"model": None, "variant": None} for role in (
+            "dado-master", "dado-explorer", "dado-worker", "dado-verifier", "dado-researcher", "dado-historian"
+        )
+    }
+
+
+def test_profile_default_editing_and_inactive_profile_switch_semantics(tmp_path, monkeypatch):
+    from dado import cli
+    Store(tmp_path).init()
+    install(tmp_path)
+    monkeypatch.setattr(cli, "catalog", lambda executable: ["provider/alpha", "provider/beta", "provider/gamma"])
+    worker = tmp_path / ".opencode/agents/dado-worker.md"
+    historian = tmp_path / ".opencode/agents/dado-historian.md"
+
+    def run(*flags):
+        args = cli.build_parser().parse_args(["models", "--project", str(tmp_path), *flags])
+        return args.func(args)
+
+    run("--model", "provider/alpha", "--variant", "high", "--roles", "dado-worker")
+    run("--model", "provider/alpha", "--roles", "dado-historian")
+    original_historian = historian.read_text()
+    run("--profile", "economical", "--model", "provider/beta", "--variant", "fast", "--roles", "dado-worker")
+    run("--profile", "economical", "--model", "inherit", "--roles", "dado-historian")
+    assert agent_model(worker) == "provider/alpha#high"  # inactive edit does not project
+    assert historian.read_text() == original_historian
+
+    use = cli.build_parser().parse_args(["profiles", "use", "economical", "--project", str(tmp_path)])
+    cli.catalog = lambda executable: ["provider/alpha", "provider/beta", "provider/gamma"]
+    use.func(use)
+    assert agent_model(worker) == "provider/beta#fast"
+    assert agent_model(historian) is None  # no stale model from the previously active profile
+    config = Store(tmp_path).load_config()
+    assert config["active_profile"] == "economical"
+
+    # No --profile always targets default, even with another profile active.
+    run("--model", "provider/gamma", "--roles", "dado-worker")
+    assert agent_model(worker) == "provider/beta#fast"
+    assert Store(tmp_path).load_config()["profiles"]["default"]["dado-worker"] == {
+        "model": "provider/gamma", "variant": None,
+    }
+    use_default = cli.build_parser().parse_args(["profiles", "use", "default", "--project", str(tmp_path)])
+    use_default.func(use_default)
+    assert agent_model(worker) == "provider/gamma"
+
+
+def test_profiles_list_use_invalid_names_and_failed_edits_are_safe(tmp_path, monkeypatch, capsys):
+    from dado import cli
+    Store(tmp_path).init()
+    install(tmp_path)
+    monkeypatch.setattr(cli, "catalog", lambda executable: ["provider/alpha"])
+    worker = tmp_path / ".opencode/agents/dado-worker.md"
+
+    def run(*argv):
+        args = cli.build_parser().parse_args([*argv, "--project", str(tmp_path)])
+        return args.func(args)
+
+    run("profiles", "list")
+    listed = capsys.readouterr().out
+    assert "Active profile: default" in listed
+    assert "Available profiles: default" in listed
+    original_config = (tmp_path / ".dado/config.yaml").read_text()
+    original_agents = {role: (tmp_path / f".opencode/agents/{role}.md").read_text() for role in (
+        "dado-master", "dado-explorer", "dado-worker", "dado-verifier", "dado-researcher", "dado-historian"
+    )}
+    with pytest.raises(ValidationError, match="Profile names"):
+        run("models", "--profile", "../bad", "--model", "provider/alpha")
+    with pytest.raises(ValidationError, match="Unknown model profile"):
+        run("profiles", "use", "absent")
+    with pytest.raises(ValidationError, match="catalog"):
+        run("models", "--model", "provider/missing", "--roles", "dado-worker")
+    with pytest.raises(ValidationError, match="Variant"):
+        run("models", "--model", "provider/alpha", "--variant", "invalid variant", "--roles", "dado-worker")
+    assert (tmp_path / ".dado/config.yaml").read_text() == original_config
+    assert {role: (tmp_path / f".opencode/agents/{role}.md").read_text() for role in original_agents} == original_agents
+
+    # A later malformed role also fails preflight before any other role or config is written.
+    run("models", "--profile", "alternate", "--model", "provider/alpha", "--roles", "dado-worker")
+    original_config = (tmp_path / ".dado/config.yaml").read_text()
+    historian = tmp_path / ".opencode/agents/dado-historian.md"
+    historian.write_text("---\nmodel: [broken\n---\n")
+    original_worker = worker.read_text()
+    with pytest.raises(ValidationError, match="Malformed YAML frontmatter"):
+        run("profiles", "use", "alternate")
+    assert (tmp_path / ".dado/config.yaml").read_text() == original_config
+    assert worker.read_text() == original_worker
+
+
+def test_profile_command_is_managed_and_init_force_update_preserves_active_assignment(tmp_path, monkeypatch):
+    from dado import cli
+    Store(tmp_path).init()
+    installed, _ = install(tmp_path)
+    command = tmp_path / ".opencode/commands/dado-profile.md"
+    assert ".opencode/commands/dado-profile.md" in installed
+    assert command.is_file()
+    command_text = command.read_text()
+    assert "agent: dado-master" in command_text
+    assert "$ARGUMENTS" in command_text
+    assert "shell block" in command_text
+    assert "ask the user to choose" in command_text
+    assert "current in-flight model" in command_text
+    assert "/reload" in command_text
+    assert "```" not in command_text
+    manifest = json.loads((tmp_path / ".dado/managed-files.json").read_text())
+    assert "commands/dado-profile.md" in manifest
+
+    monkeypatch.setattr(cli, "catalog", lambda executable: ["provider/alpha"])
+    for argv in (
+        ["models", "--profile", "steady", "--model", "provider/alpha", "--variant", "high", "--roles", "dado-worker"],
+        ["profiles", "use", "steady"],
+    ):
+        args = cli.build_parser().parse_args([*argv, "--project", str(tmp_path)])
+        args.func(args)
+    worker = tmp_path / ".opencode/agents/dado-worker.md"
+    assert agent_model(worker) == "provider/alpha#high"
+    custom = worker.read_text() + "\n# locally customized body\n"
+    worker.write_text(custom)
+
+    # Normal init keeps profile data and the active model assignment despite a managed-file conflict.
+    args = cli.build_parser().parse_args(["init", "--project", str(tmp_path)])
+    args.func(args)
+    config = Store(tmp_path).load_config()
+    assert config["active_profile"] == "steady"
+    assert config["profiles"]["steady"]["dado-worker"] == {"model": "provider/alpha", "variant": "high"}
+    assert agent_model(worker) == "provider/alpha#high"
+    assert "locally customized body" in worker.read_text()
+
+    # Explicit force replaces template text, then projects model state back from config.
+    args = cli.build_parser().parse_args(["update", "--project", str(tmp_path), "--force"])
+    args.func(args)
+    assert agent_model(worker) == "provider/alpha#high"
+    assert "locally customized body" not in worker.read_text()
+    assert Store(tmp_path).load_config()["active_profile"] == "steady"
+
+
 def test_packet_filename_must_match_id(tmp_path):
     store = Store(tmp_path)
     path = store.create_work("Packet", "Request")
@@ -203,7 +354,7 @@ def test_interrupted_work_recovery_full_acceptance_and_archive(tmp_path):
     path = store.create_work("Acceptance feature", "Add a feature")
     work_id = path.name
     _add_req(store, path)
-    assert {p.name for p in path.iterdir() if p.is_file()} == {"work.yaml", "request.md"}
+    assert {p.name for p in path.iterdir() if p.is_file()} == {"work.yaml", "request.md", "identity.yaml"}
     first = task("T-001")
     second = task("T-002", ["T-001"])
     store.add_task(work_id, first)

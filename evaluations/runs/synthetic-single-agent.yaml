@@ -1,0 +1,158 @@
+# SYNTHETIC recorded runs — clearly fixture data, never real measurements.
+# Narrative intent: a single agent without an independent verifier shows
+# repeated acceptance failures recorded as verifier PASS (false PASS), missed
+# injected bugs and heavy human rework; one run has unknown cost on purpose.
+synthetic: true
+agent: single_agent
+runs:
+  - case: CASE-small-edit
+    rep: 1
+    acceptance: true
+    latency_seconds: 95
+    tokens_in: 3200
+    tokens_out: 1200
+    cost: 0.42
+    retries: 0
+    human_minutes: 5
+    bugs_injected: 0
+    bugs_found: 0
+    verifier_verdict: PASS
+  - case: CASE-small-edit
+    rep: 2
+    acceptance: true
+    latency_seconds: 88
+    tokens_in: 3000
+    tokens_out: 900
+    cost: null   # unknown cost: recorded nowhere, never treated as free
+    retries: 0
+    human_minutes: 0
+    bugs_injected: 0
+    bugs_found: 0
+    verifier_verdict: PASS
+  - case: CASE-multfile-bug
+    rep: 1
+    acceptance: false
+    latency_seconds: 640
+    tokens_in: 28000
+    tokens_out: 9000
+    cost: 3.10
+    retries: 2
+    human_minutes: 45
+    bugs_injected: 2
+    bugs_found: 0
+    verifier_verdict: PASS   # false PASS: claimed success beyond what was done
+    rework_minutes: 25
+  - case: CASE-multfile-bug
+    rep: 2
+    acceptance: false
+    latency_seconds: 590
+    tokens_in: 26000
+    tokens_out: 8500
+    cost: 2.80
+    retries: 1
+    human_minutes: 30
+    bugs_injected: 2
+    bugs_found: 1
+    verifier_verdict: PASS   # false PASS
+    rework_minutes: 20
+  - case: CASE-transversal-change
+    rep: 1
+    acceptance: false
+    latency_seconds: 950
+    tokens_in: 41000
+    tokens_out: 15000
+    cost: 5.40
+    retries: 3
+    human_minutes: 90
+    bugs_injected: 3
+    bugs_found: 1
+    verifier_verdict: PASS   # false PASS
+    rework_minutes: 60
+  - case: CASE-transversal-change
+    rep: 2
+    acceptance: false
+    latency_seconds: 1010
+    tokens_in: 43000
+    tokens_out: 16000
+    cost: 5.60
+    retries: 2
+    human_minutes: 100
+    bugs_injected: 3
+    bugs_found: 2
+    verifier_verdict: PASS   # false PASS
+    rework_minutes: 70
+  - case: CASE-parallel-research
+    rep: 1
+    acceptance: true
+    latency_seconds: 240
+    tokens_in: 15000
+    tokens_out: 5000
+    cost: 1.20
+    retries: 0
+    human_minutes: 10
+    bugs_injected: 1
+    bugs_found: 1
+    verifier_verdict: PASS
+  - case: CASE-parallel-research
+    rep: 2
+    acceptance: true
+    latency_seconds: 260
+    tokens_in: 16000
+    tokens_out: 5200
+    cost: 1.25
+    retries: 0
+    human_minutes: 15
+    bugs_injected: 1
+    bugs_found: 1
+    verifier_verdict: PASS
+  - case: CASE-sequential-workflow
+    rep: 1
+    acceptance: false
+    latency_seconds: 1500
+    tokens_in: 62000
+    tokens_out: 21000
+    cost: 7.90
+    retries: 2
+    human_minutes: 120
+    bugs_injected: 2
+    bugs_found: 0
+    verifier_verdict: PASS   # false PASS
+    rework_minutes: 90
+  - case: CASE-sequential-workflow
+    rep: 2
+    acceptance: true
+    latency_seconds: 1300
+    tokens_in: 58000
+    tokens_out: 19000
+    cost: 7.20
+    retries: 1
+    human_minutes: 60
+    bugs_injected: 2
+    bugs_found: 2
+    verifier_verdict: PASS
+    rework_minutes: 30
+  - case: CASE-interrupted-resume
+    rep: 1
+    acceptance: false
+    latency_seconds: 420
+    tokens_in: 19000
+    tokens_out: 7000
+    cost: null   # unknown cost
+    retries: 1
+    human_minutes: 40
+    bugs_injected: 1
+    bugs_found: 0
+    verifier_verdict: PASS   # false PASS
+    rework_minutes: 30
+  - case: CASE-interrupted-resume
+    rep: 2
+    acceptance: true
+    latency_seconds: 380
+    tokens_in: 21000
+    tokens_out: 8000
+    cost: 1.80
+    retries: 0
+    human_minutes: 20
+    bugs_injected: 1
+    bugs_found: 1
+    verifier_verdict: PASS

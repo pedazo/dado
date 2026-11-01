@@ -25,9 +25,17 @@ description: DADO durable work protocol, artifact boundaries, state recovery, an
 5. Ask the deterministic CLI for ready tasks. Delegate only packets whose dependencies are done and whose scopes do not conflict.
 6. Worker returns a compact Result Packet. Independent verifier evaluates original acceptance criteria and independently checks actual changed paths; a PASS must record these paths (even an empty list). Runtime transitions through review to done only after verification.
 7. On ambiguity, failure, invalidation, scope expansion, or changed requirements stop and escalate. Invalidation marks dependent descendants stale.
-8. On restart, run `dado resume`/`dado status`; reconcile uncertain running tasks conservatively, never repeat verified done tasks.
+8. On restart, run `dado resume`/`dado status`; reconcile uncertain running tasks conservatively. Inspect interrupted journals with `dado repair` before explicit `--apply`; incomplete preparation is never replayable. Do not repeat implementation for verified done tasks, but re-verify when relevant code changed.
 9. Validate requirements, explicitly promote durable project knowledge with provenance, create summary, and archive only when complete.
 10. For a mistaken work, stop/reconcile running or reviewing tasks before archiving it as cancelled. Cancelled archives preserve the original request and do not imply completion.
 
 ## Context discipline
 Keep packets and handoffs compact. Do not send large logs or unrelated history to the master. Persist useful evidence and refer to it. Never persist chain-of-thought. Human approval is a product boundary, not a formality.
+
+## Evidence and local execution
+- Map acceptance criteria to independent observations. `dado check` captures only an explicitly supplied command after `--`; descriptions of checks are declared evidence, not captured execution. Record successful checks with `task verify --record` and inspect actual changed paths with `--paths-checked`/`--changed`.
+- PASS is bound to the relevant code snapshot. Recheck stale evidence and verify interactions with a work-level captured check and `dado work verify` before completion when integration policy requires it.
+- Shared policies and promoted knowledge are distinct from local focus, execution state and personal profiles. For layout v2, apply a changed profile through a new `dado host exec` invocation. Never write personal models into shared agents.
+- Exchange work using explicit `dado handoff export/import`; imported approvals and verdicts are historical, and the recipient must approve and verify a new local execution.
+- Use local isolated snapshots for concurrent edits, declare scopes and resource reservations, integrate explicitly and verify the combined result. Reservations are checkout-local, not distributed locks.
+- Policy recommendations are optional and uncalibrated until real comparisons are authorized. Record the reason for routing/escalation and honor approved budgets; unknown cost is not zero. No paid evaluations without an explicit budget. A work budget requires a task reservation before admission; provider billing is external.

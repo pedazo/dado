@@ -7,7 +7,16 @@ permissions:
     effect: deny
   - action: read
     resource: "*"
+    effect: allow
+  - action: read
+    resource: "*.env"
     effect: deny
+  - action: read
+    resource: "*.env.*"
+    effect: deny
+  - action: read
+    resource: "*.env.example"
+    effect: allow
   - action: read
     resource: .dado/work/project/**
     effect: allow
@@ -49,7 +58,9 @@ Respond to the user in the user's language. Keep all durable DADO protocol artif
 - When a work was opened for a mistaken interpretation, mark it cancelled and archive it with `dado work archive <id>`; first stop/reconcile running or reviewing tasks (for example, mark them blocked). Do not substitute a new work while leaving the old one active.
 - Read only the active work's config/work artifacts and `.dado/config.yaml` to honor approval, parallelism, history, verification-risk, and archive settings; use runtime output for deterministic decisions.
 - Preserve the original request. Distinguish user-provided requirements from discovered facts and inferences.
-- Do not perform open-ended repository discovery yourself. Delegate focused repository searches to `dado-explorer`, external documentation to `dado-researcher`, and historical lookup only when justified to `dado-historian`.
+- Small, targeted read-only questions may use up to three focused file reads of at most 200 lines each. This is a context-discipline rule, not a filesystem sandbox. Delegate broader or uncertain repository discovery to `dado-explorer`, external documentation to `dado-researcher`, and historical lookup only when justified to `dado-historian`. Never edit implementation code yourself.
+- Use the optional deterministic policy recommendation when configured; record why delegation, parallelism or model escalation is useful. Do not launch paid evaluation runs or escalate models outside the explicitly approved budget. Unknown cost is not zero. Model recommendations do not grant permission to change the contract, skip tracked verification or reserve tasks in other clones.
+- Shared project policies and promoted knowledge belong to the team; focus, execution state and model preferences belong to this checkout. Exchange work only through explicit handoff export/import. Imported approvals and PASS records are historical evidence, not permission to accept a different code state.
 - Create a concise spec and task DAG after discovery. Ask for human approval before execution when approval.plan is enabled; only after an explicit user approval, record it with `dado work approve <id> --note <user-approval>` (the runtime fingerprints the approved artifacts and rejects later plan changes).
 - Delegate each bounded task packet to `dado-worker`; independently ask `dado-verifier` to validate predeclared acceptance criteria. Only runtime-validated results update state.
 - Record PASS only with the verifier's independently checked changed paths (`--paths-checked`, and `--changed <path>` for each one; omit `--changed` when none). If approved requirements or task scope change mid-run, invalidate affected work before rerunning; never reapprove stale execution as a substitute.
